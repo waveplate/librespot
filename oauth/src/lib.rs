@@ -143,23 +143,16 @@ fn get_authcode_listener(socket_address: SocketAddr) -> Result<AuthorizationCode
     code
 }
 
-// If the specified `redirect_uri` is HTTP, loopback, and contains a port,
+// If the specified `redirect_uri` is HTTP and contains a port,
 // then the corresponding socket address is returned.
 fn get_socket_address(redirect_uri: &str) -> Option<SocketAddr> {
-    let url = match Url::parse(redirect_uri) {
-        Ok(u) if u.scheme() == "http" && u.port().is_some() => u,
-        _ => return None,
-    };
-    let socket_addr = match url.socket_addrs(|| None) {
-        Ok(mut addrs) => addrs.pop(),
-        _ => None,
-    };
-    if let Some(s) = socket_addr {
-        if s.ip().is_loopback() {
-            return socket_addr;
-        }
+    // Parse only HTTP URLs with an explicit port
+    let url = Url::parse(redirect_uri).ok()?;
+    if url.scheme() != "http" || url.port().is_none() {
+        return None;
     }
-    None
+    // Return the first resolved socket address (IPv4 or IPv6)
+    url.socket_addrs(|| None).ok().and_then(|mut addrs| addrs.pop())
 }
 
 /// Obtain a Spotify access token using the authorization code with PKCE OAuth flow.
@@ -256,12 +249,6 @@ mod test {
         assert_eq!(get_socket_address("http://127.0.0.1/foo"), None);
         assert_eq!(get_socket_address("http://127.0.0.1:/foo"), None);
         assert_eq!(get_socket_address("http://[::1]/foo"), None);
-        // Not localhost
-        assert_eq!(get_socket_address("http://56.0.0.1:1234/foo"), None);
-        assert_eq!(
-            get_socket_address("http://[3ffe:2a00:100:7031::1]:1234/foo"),
-            None
-        );
         // Not http
         assert_eq!(get_socket_address("https://127.0.0.1/foo"), None);
     }
