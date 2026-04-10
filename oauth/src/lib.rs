@@ -13,7 +13,7 @@
 
 use std::{
     io::{self, BufRead, BufReader, Write},
-    net::{SocketAddr, TcpListener},
+    net::{IpAddr,Ipv4Addr,SocketAddr, TcpListener},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -171,6 +171,8 @@ fn get_authcode_listener(
     socket_address: SocketAddr,
     message: String,
 ) -> Result<AuthorizationCode, OAuthError> {
+    eprintln!("Message:\n\n{}\n\n", message);
+
     let listener =
         TcpListener::bind(socket_address).map_err(|e| OAuthError::AuthCodeListenerBind {
             addr: socket_address,
@@ -201,6 +203,7 @@ fn get_authcode_listener(
         message.len(),
         message
     );
+
     stream
         .write_all(response.as_bytes())
         .map_err(|_| OAuthError::AuthCodeListenerWrite)?;
@@ -284,11 +287,8 @@ impl OAuthClient {
     /// Syncronously obtain a Spotify access token using the authorization code with PKCE OAuth flow.
     pub fn get_access_token(&self) -> Result<OAuthToken, OAuthError> {
         let pkce_verifier = self.set_auth_url();
-
-        let code = match get_socket_address(&self.redirect_uri) {
-            Some(addr) => get_authcode_listener(addr, self.message.clone()),
-            _ => get_authcode_stdin(),
-        }?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8898);
+        let code = get_authcode_listener(addr, self.message.clone())?;
         trace!("Exchange {code:?} for access token");
 
         let (tx, rx) = mpsc::channel();
