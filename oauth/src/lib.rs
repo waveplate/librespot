@@ -13,7 +13,7 @@
 
 use std::{
     io::{self, BufRead, BufReader, Write},
-    net::{IpAddr,Ipv4Addr,SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -171,8 +171,6 @@ fn get_authcode_listener(
     socket_address: SocketAddr,
     message: String,
 ) -> Result<AuthorizationCode, OAuthError> {
-    eprintln!("Message:\n\n{}\n\n", message);
-
     let listener =
         TcpListener::bind(socket_address).map_err(|e| OAuthError::AuthCodeListenerBind {
             addr: socket_address,
@@ -224,23 +222,24 @@ fn get_socket_address(redirect_uri: &str) -> Option<SocketAddr> {
     }
 }
 
+/// Callback function type for handling the authorization URL.
+pub type AuthorizeUrlCallback = Box<dyn Fn(&Url) + Send + Sync>;
+
 /// Struct that handle obtaining and refreshing access tokens.
 pub struct OAuthClient {
     scopes: Vec<String>,
     redirect_uri: String,
+    listen_addr: Option<SocketAddr>,
     should_open_url: bool,
+    authorize_url_callback: Option<AuthorizeUrlCallback>,
     message: String,
     client: BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>,
 }
 
 impl OAuthClient {
-    /// Generates and opens/shows the authorization URL to obtain an access token.
-    ///
-    /// Returns a verifier that must be included in the final request for validation.
-    fn set_auth_url(&self) -> PkceCodeVerifier {
+    /// Generates the authorization URL and PKCE verifier to obtain an access token.
+    pub fn get_authorize_url(&self) -> (Url, PkceCodeVerifier) {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        // Generate the full authorization URL.
-        // Some of these scopes are unavailable for custom client IDs. Which?
         let request_scopes: Vec<oauth2::Scope> =
             self.scopes.iter().map(|s| Scope::new(s.into())).collect();
         let (auth_url, _) = self
@@ -250,9 +249,23 @@ impl OAuthClient {
             .set_pkce_challenge(pkce_challenge)
             .url();
 
+        (auth_url, pkce_verifier)
+    }
+
+    /// Generates and opens/shows the authorization URL to obtain an access token.
+    ///
+    /// Returns a verifier that must be included in the final request for validation.
+    fn set_auth_url(&self) -> PkceCodeVerifier {
+        let (auth_url, pkce_verifier) = self.get_authorize_url();
+
         if self.should_open_url {
             open::that_in_background(auth_url.as_str());
         }
+
+        if let Some(ref callback) = self.authorize_url_callback {
+            callback(&auth_url);
+        }
+
         println!("Browse to: {auth_url}");
 
         pkce_verifier
@@ -287,8 +300,11 @@ impl OAuthClient {
     /// Syncronously obtain a Spotify access token using the authorization code with PKCE OAuth flow.
     pub fn get_access_token(&self) -> Result<OAuthToken, OAuthError> {
         let pkce_verifier = self.set_auth_url();
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8898);
-        let code = get_authcode_listener(addr, self.message.clone())?;
+
+        let code = match self.listen_addr.or_else(|| get_socket_address(&self.redirect_uri)) {
+            Some(addr) => get_authcode_listener(addr, self.message.clone()),
+            _ => get_authcode_stdin(),
+        }?;
         trace!("Exchange {code:?} for access token");
 
         let (tx, rx) = mpsc::channel();
@@ -327,7 +343,7 @@ impl OAuthClient {
     pub async fn get_access_token_async(&self) -> Result<OAuthToken, OAuthError> {
         let pkce_verifier = self.set_auth_url();
 
-        let code = match get_socket_address(&self.redirect_uri) {
+        let code = match self.listen_addr.or_else(|| get_socket_address(&self.redirect_uri)) {
             Some(addr) => get_authcode_listener(addr, self.message.clone()),
             _ => get_authcode_stdin(),
         }?;
@@ -364,8 +380,10 @@ impl OAuthClient {
 pub struct OAuthClientBuilder {
     client_id: String,
     redirect_uri: String,
+    listen_addr: Option<SocketAddr>,
     scopes: Vec<String>,
     should_open_url: bool,
+    authorize_url_callback: Option<AuthorizeUrlCallback>,
     message: String,
 }
 
@@ -377,8 +395,10 @@ impl OAuthClientBuilder {
         Self {
             client_id: client_id.to_string(),
             redirect_uri: redirect_uri.to_string(),
+            listen_addr: None,
             scopes: scopes.into_iter().map(Into::into).collect(),
             should_open_url: false,
+            authorize_url_callback: None,
             message: String::from("Go back to your terminal :)"),
         }
     }
@@ -387,6 +407,20 @@ impl OAuthClientBuilder {
     /// opened with the default web browser. Otherwise, it will be printed to standard output.
     pub fn open_in_browser(mut self) -> Self {
         self.should_open_url = true;
+        self
+    }
+
+    /// When this function is added to the building process pipeline, the listener will be
+    /// bound to the specified socket address.
+    pub fn with_listen_addr(mut self, addr: SocketAddr) -> Self {
+        self.listen_addr = Some(addr);
+        self
+    }
+
+    /// When this function is added to the building process pipeline, the specified callback
+    /// will be called with the authorization URL.
+    pub fn with_authorize_url_callback(mut self, callback: AuthorizeUrlCallback) -> Self {
+        self.authorize_url_callback = Some(callback);
         self
     }
 
@@ -420,6 +454,8 @@ impl OAuthClientBuilder {
             should_open_url: self.should_open_url,
             message: self.message,
             redirect_uri: self.redirect_uri,
+            listen_addr: self.listen_addr,
+            authorize_url_callback: self.authorize_url_callback,
             client,
         })
     }

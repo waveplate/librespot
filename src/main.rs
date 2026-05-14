@@ -216,6 +216,10 @@ struct Setup {
     credentials: Option<Credentials>,
     enable_oauth: bool,
     oauth_port: Option<u16>,
+    oauth_redirect_uri: Option<String>,
+    oauth_listen_addr: Option<std::net::SocketAddr>,
+    oauth_open_browser: bool,
+    oauth_url_file: Option<PathBuf>,
     zeroconf_port: u16,
     player_event_program: Option<String>,
     emit_sink_events: bool,
@@ -266,6 +270,10 @@ async fn get_setup() -> Setup {
     const NORMALISATION_RELEASE: &str = "normalisation-release";
     const NORMALISATION_THRESHOLD: &str = "normalisation-threshold";
     const OAUTH_PORT: &str = "oauth-port";
+    const OAUTH_REDIRECT_URI: &str = "oauth-redirect-uri";
+    const OAUTH_LISTEN_ADDR: &str = "oauth-listen-addr";
+    const OAUTH_NO_BROWSER: &str = "oauth-no-browser";
+    const OAUTH_URL_FILE: &str = "oauth-url-file";
     const ONEVENT: &str = "onevent";
     #[cfg(feature = "passthrough-decoder")]
     const PASSTHROUGH: &str = "passthrough";
@@ -306,6 +314,9 @@ async fn get_setup() -> Setup {
     const ZEROCONF_INTERFACE_SHORT: &str = "i";
     const ENABLE_OAUTH_SHORT: &str = "j";
     const OAUTH_PORT_SHORT: &str = "K";
+    const OAUTH_REDIRECT_URI_SHORT: &str = ""; // no short flag
+    const OAUTH_LISTEN_ADDR_SHORT: &str = ""; // no short flag
+    const OAUTH_NO_BROWSER_SHORT: &str = ""; // no short flag
     const ACCESS_TOKEN_SHORT: &str = "k";
     const CACHE_SIZE_LIMIT_SHORT: &str = "M";
     const MIXER_TYPE_SHORT: &str = "m";
@@ -524,6 +535,29 @@ async fn get_setup() -> Setup {
         OAUTH_PORT,
         "The port the oauth redirect server uses 1 - 65535. Ports <= 1024 may require root privileges.",
         "PORT",
+    )
+    .optopt(
+        OAUTH_REDIRECT_URI_SHORT,
+        OAUTH_REDIRECT_URI,
+        "The redirect URI used for OAuth login. Defaults to http://127.0.0.1:<oauth-port>/login.",
+        "URI",
+    )
+    .optopt(
+        OAUTH_LISTEN_ADDR_SHORT,
+        OAUTH_LISTEN_ADDR,
+        "The socket address the oauth redirect server listens on. Defaults to 127.0.0.1:<oauth-port>.",
+        "ADDR",
+    )
+    .optflag(
+        OAUTH_NO_BROWSER_SHORT,
+        OAUTH_NO_BROWSER,
+        "Do not attempt to open the OAuth URL in a web browser.",
+    )
+    .optopt(
+        "",
+        OAUTH_URL_FILE,
+        "Write the OAuth authorization URL to a file.",
+        "PATH",
     )
     .optopt(
         ONEVENT_SHORT,
@@ -1278,6 +1312,16 @@ async fn get_setup() -> Setup {
         Some(5588)
     };
 
+    let oauth_redirect_uri = opt_str(OAUTH_REDIRECT_URI);
+    let oauth_listen_addr = opt_str(OAUTH_LISTEN_ADDR).map(|addr| {
+        addr.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
+            invalid_error_msg(OAUTH_LISTEN_ADDR, OAUTH_LISTEN_ADDR_SHORT, &addr, "SocketAddr (IP:PORT)", "");
+            exit(1);
+        })
+    });
+    let oauth_open_browser = !opt_present(OAUTH_NO_BROWSER);
+    let oauth_url_file = opt_str(OAUTH_URL_FILE).map(PathBuf::from);
+
     if let Some(reason) = no_discovery_reason.as_deref() {
         if opt_present(ZEROCONF_PORT) {
             warn!("With {reason} `--{ZEROCONF_PORT}` / `-{ZEROCONF_PORT_SHORT}` has no effect.");
@@ -1854,6 +1898,10 @@ async fn get_setup() -> Setup {
         credentials,
         enable_oauth,
         oauth_port,
+        oauth_redirect_uri,
+        oauth_listen_addr,
+        oauth_open_browser,
+        oauth_url_file,
         zeroconf_port,
         player_event_program,
         emit_sink_events,
@@ -1952,17 +2000,40 @@ async fn main() {
             Some(port) => format!(":{port}"),
             _ => String::new(),
         };
-        let client = OAuthClientBuilder::new(
+
+        let redirect_uri = setup
+            .oauth_redirect_uri
+            .unwrap_or_else(|| format!("http://127.0.0.1{port_str}/login"));
+
+        let mut client_builder = OAuthClientBuilder::new(
             &setup.session_config.client_id,
-            &format!("http://127.0.0.1{port_str}/login"),
+            &redirect_uri,
             OAUTH_SCOPES.to_vec(),
-        )
-        .open_in_browser()
-        .build()
-        .unwrap_or_else(|e| {
+        );
+
+        if let Some(listen_addr) = setup.oauth_listen_addr {
+            client_builder = client_builder.with_listen_addr(listen_addr);
+        }
+
+        if setup.oauth_open_browser {
+            client_builder = client_builder.open_in_browser();
+        }
+
+        if let Some(url_file) = setup.oauth_url_file {
+            client_builder = client_builder.with_authorize_url_callback(Box::new(move |url| {
+                if let Err(e) = std::fs::write(&url_file, url.to_string()) {
+                    error!("Failed to write OAuth URL to {}: {}", url_file.display(), e);
+                } else {
+                    info!("OAuth URL written to {}", url_file.display());
+                }
+            }));
+        }
+
+        let client = client_builder.build().unwrap_or_else(|e| {
             error!("Failed to create OAuth client: {e}");
             exit(1);
         });
+
         let oauth_token = client.get_access_token().unwrap_or_else(|e| {
             error!("Failed to get Spotify access token: {e}");
             exit(1);

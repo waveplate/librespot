@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [oauth] Add `listen_addr` and `authorize_url_callback` to `OAuthClient` and `OAuthClientBuilder` to support custom listen addresses and flexible authorization URL handling.
+- [main] Add `--oauth-redirect-uri`, `--oauth-listen-addr`, `--oauth-no-browser`, and `--oauth-url-file` options to improve OAuth flow in Docker and reverse proxy environments.
 - [connect] Add method `add_to_queue` to `Spirc` to add tracks, episodes, albums and playlists to the queue
 - [playback] Add `SetQueue` player event, emitting when the queue changes (context loaded, track added to queue, or queue set via Spotify Connect). Gated behind `ConnectConfig::emit_set_queue_events`
 
